@@ -90,14 +90,16 @@ class Client extends EventEmitter {
      */
     async initialize() {
         let [browser, page] = [null, null];
-
+        
         await this.authStrategy.beforeBrowserInitialized();
-
+    
         const puppeteerOpts = this.options.puppeteer;
         if (puppeteerOpts && puppeteerOpts.browserWSEndpoint) {
             browser = await puppeteer.connect(puppeteerOpts);
             page = await browser.newPage();
+        
         } else {
+        
             const browserArgs = [...(puppeteerOpts.args || [])];
             if(!browserArgs.find(arg => arg.includes('--user-agent'))) {
                 browserArgs.push(`--user-agent=${this.options.userAgent}`);
@@ -108,41 +110,48 @@ class Client extends EventEmitter {
         }
 
         if (this.options.proxyAuthentication !== undefined) {
+        
             await page.authenticate(this.options.proxyAuthentication);
         }
-      
+    
         await page.setUserAgent(this.options.userAgent);
         if (this.options.bypassCSP) await page.setBypassCSP(true);
 
+    
         this.pupBrowser = browser;
         this.pupPage = page;
 
         await this.authStrategy.afterBrowserInitialized();
         await this.initWebVersionCache();
 
+
         await page.goto(WhatsWebURL, {
             waitUntil: 'load',
             timeout: 0,
             referer: 'https://whatsapp.com/'
         });
-
+    
         await page.evaluate(`function getElementByXpath(path) {
             return document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
           }`);
 
+    
         let lastPercent = null,
             lastPercentMessage = null;
 
+    
         await page.exposeFunction('loadingScreen', async (percent, message) => {
+        
             if (lastPercent !== percent || lastPercentMessage !== message) {
                 this.emit(Events.LOADING_SCREEN, percent, message);
                 lastPercent = percent;
                 lastPercentMessage = message;
             }
         });
-
+    
         await page.evaluate(
             async function (selectors) {
+            
                 var observer = new MutationObserver(function () {
                     let progressBar = window.getElementByXpath(
                         selectors.PROGRESS
@@ -201,6 +210,7 @@ class Client extends EventEmitter {
                  * @event Client#auth_failure
                  * @param {string} message
                  */
+                
                 this.emit(Events.AUTHENTICATION_FAILURE, failureEventPayload);
                 await this.destroy();
                 if (restart) {
@@ -219,6 +229,7 @@ class Client extends EventEmitter {
                 * @event Client#qr
                 * @param {string} qr QR Code
                 */
+                
                 this.emit(Events.QR_RECEIVED, qr);
                 if (this.options.qrMaxRetries > 0) {
                     qrRetries++;
@@ -276,8 +287,7 @@ class Client extends EventEmitter {
         }
 
         await page.evaluate(ExposeStore, moduleRaid.toString());
-        const authEventPayload = await this.authStrategy.getAuthEventPayload();
-
+        const authEventPayload = await this.authStrategy.getAuthEventPayload(page);
         /**
          * Emitted when authentication is successful
          * @event Client#authenticated
@@ -584,28 +594,12 @@ class Client extends EventEmitter {
             this.emit(Events.CHAT_ARCHIVED, new Chat(this, chat), currState, prevState);
         });
 
-        await page.exposeFunction('onEditMessageEvent', (msg, newBody, prevBody) => {
-            
-            if(msg.type === 'revoked'){
-                return;
-            }
-            /**
-             * Emitted when messages are edited
-             * @event Client#message_edit
-             * @param {Message} message
-             * @param {string} newBody
-             * @param {string} prevBody
-             */
-            this.emit(Events.MESSAGE_EDIT, new Message(this, msg), newBody, prevBody);
-        });
-
         await page.evaluate(() => {
             window.Store.Msg.on('change', (msg) => { window.onChangeMessageEvent(window.WWebJS.getMessageModel(msg)); });
             window.Store.Msg.on('change:type', (msg) => { window.onChangeMessageTypeEvent(window.WWebJS.getMessageModel(msg)); });
             window.Store.Msg.on('change:ack', (msg, ack) => { window.onMessageAckEvent(window.WWebJS.getMessageModel(msg), ack); });
             window.Store.Msg.on('change:isUnsentMedia', (msg, unsent) => { if (msg.id.fromMe && !unsent) window.onMessageMediaUploadedEvent(window.WWebJS.getMessageModel(msg)); });
             window.Store.Msg.on('remove', (msg) => { if (msg.isNewMsg) window.onRemoveMessageEvent(window.WWebJS.getMessageModel(msg)); });
-            window.Store.Msg.on('change:body', (msg, newBody, prevBody) => { window.onEditMessageEvent(window.WWebJS.getMessageModel(msg), newBody, prevBody); });
             window.Store.AppState.on('change:state', (_AppState, state) => { window.onAppStateChangedEvent(state); });
             window.Store.Conn.on('change:battery', (state) => { window.onBatteryStateChangedEvent(state); });
             window.Store.Call.on('add', (call) => { window.onIncomingCall(call); });
@@ -656,6 +650,71 @@ class Client extends EventEmitter {
                 await this.destroy();
             }
         });
+    }
+
+    /**
+     * check client was autheticated or not
+     */
+    async check_state() {
+        let [browser, page] = [null, null];
+
+        await this.authStrategy.beforeBrowserInitialized();
+
+        const puppeteerOpts = this.options.puppeteer;
+        if (puppeteerOpts && puppeteerOpts.browserWSEndpoint) {
+            browser = await puppeteer.connect(puppeteerOpts);
+            page = await browser.newPage();
+        } else {
+            const browserArgs = [...(puppeteerOpts.args || [])];
+            if(!browserArgs.find(arg => arg.includes('--user-agent'))) {
+                browserArgs.push(`--user-agent=${this.options.userAgent}`);
+            }
+
+            browser = await puppeteer.launch({...puppeteerOpts, args: browserArgs});
+            page = (await browser.pages())[0];
+        }
+      
+
+        this.pupBrowser = browser;
+        this.pupPage = page;
+
+        await page.goto(WhatsWebURL, {
+            waitUntil: 'load',
+            timeout: 0,
+            referer: 'https://whatsapp.com/'
+        });
+
+        const INTRO_IMG_SELECTOR = '[data-testid="intro-md-beta-logo-dark"], [data-testid="intro-md-beta-logo-light"], [data-asset-intro-image-light="true"], [data-asset-intro-image-dark="true"]';
+        const INTRO_QRCODE_SELECTOR = 'div[data-ref] canvas';
+
+        // Checks which selector appears first
+        const needAuthentication = await Promise.race([
+            new Promise(resolve => {
+                page.waitForSelector(INTRO_IMG_SELECTOR, { timeout: this.options.authTimeoutMs })
+                    .then(() => {
+                        console.log('ok1');
+                        resolve(false);
+                    })
+                    .catch((err) => resolve(err));
+            }),
+            new Promise(resolve => {
+                page.waitForSelector(INTRO_QRCODE_SELECTOR, { timeout: this.options.authTimeoutMs })
+                    .then(() => {
+                        console.log('ok2');
+                        resolve(true);
+                    })
+                    .catch((err) => resolve(err));
+            })
+        ]);
+
+        // Checks if an error occurred on the first found selector. The second will be discarded and ignored by .race;
+        if (needAuthentication) {
+            this.destroy();
+            return false;
+        } else {
+            this.destroy();
+            return true;
+        };
     }
 
     async initWebVersionCache() {
@@ -748,7 +807,7 @@ class Client extends EventEmitter {
      * @property {string[]} [stickerCategories=undefined] - Sets the categories of the sticker, (if sendMediaAsSticker is true). Provide emoji char array, can be null.
      * @property {MessageMedia} [media] - Media to be sent
      */
-    
+
     /**
      * Send a message to a specific chatId
      * @param {string} chatId
@@ -758,10 +817,6 @@ class Client extends EventEmitter {
      * @returns {Promise<Message>} Message that was just sent
      */
     async sendMessage(chatId, content, options = {}) {
-        if (options.mentions && options.mentions.some(possiblyContact => possiblyContact instanceof Contact)) {
-            console.warn('Mentions with an array of Contact are now deprecated. See more at https://github.com/pedroslopez/whatsapp-web.js/pull/2166.');
-            options.mentions = options.mentions.map(a => a.id._serialized);
-        }
         let internalOptions = {
             linkPreview: options.linkPreview === false ? undefined : true,
             sendAudioAsVoice: options.sendAudioAsVoice,
@@ -771,7 +826,7 @@ class Client extends EventEmitter {
             caption: options.caption,
             quotedMessageId: options.quotedMessageId,
             parseVCards: options.parseVCards === false ? false : true,
-            mentionedJidList: Array.isArray(options.mentions) ? options.mentions : [],
+            mentionedJidList: Array.isArray(options.mentions) ? options.mentions.map(contact => contact.id._serialized) : [],
             extraOptions: options.extra
         };
 
@@ -801,7 +856,7 @@ class Client extends EventEmitter {
             internalOptions.list = content;
             content = '';
         }
-
+        
         if (internalOptions.sendMediaAsSticker && internalOptions.attachment) {
             internalOptions.attachment = await Util.formatToWebpSticker(
                 internalOptions.attachment, {
@@ -827,7 +882,7 @@ class Client extends EventEmitter {
 
         return new Message(this, newMessage);
     }
-    
+
     /**
      * Searches for messages
      * @param {string} query
@@ -1331,35 +1386,6 @@ class Client extends EventEmitter {
         }, this.info.wid._serialized);
 
         return success;
-    }
-    
-    /**
-     * Change labels in chats
-     * @param {Array<number|string>} labelIds
-     * @param {Array<string>} chatIds
-     * @returns {Promise<void>}
-     */
-    async addOrRemoveLabels(labelIds, chatIds) {
-
-        return this.pupPage.evaluate(async (labelIds, chatIds) => {
-            if (['smba', 'smbi'].indexOf(window.Store.Conn.platform) === -1) {
-                throw '[LT01] Only Whatsapp business';
-            }
-            const labels = window.WWebJS.getLabels().filter(e => labelIds.find(l => l == e.id) !== undefined);
-            const chats = window.Store.Chat.filter(e => chatIds.includes(e.id._serialized));
-
-            let actions = labels.map(label => ({id: label.id, type: 'add'}));
-
-            chats.forEach(chat => {
-                (chat.labels || []).forEach(n => {
-                    if (!actions.find(e => e.id == n)) {
-                        actions.push({id: n, type: 'remove'});
-                    }
-                });
-            });
-
-            return await window.Store.Label.addOrRemoveLabels(actions, chats);
-        }, labelIds, chatIds);
     }
 }
 
